@@ -3,7 +3,7 @@ import os
 # Your Telegram API credentials (from my.telegram.org)
 API_ID = 21503125
 API_HASH = "bab9855c442e9e4e87f413cb5b9dc3f9"
-BOT_TOKEN = "8768725493:AAFDhnWucAWD9Tl9djbRtOr6v5bUUOFmCQY"
+BOT_TOKEN = "8767495924:AAGwRxO23fTqkb3xhA7Zait_fVZ-rtBxgys"
 
 # Channel ID for logs - YOUR ACTUAL CHANNEL ID
 # Channel: Your private channel
