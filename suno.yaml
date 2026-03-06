@@ -1,12 +1,10 @@
 # Suno Render Configuration
 service:
   name: study-iq-bot
-  type: web
+  type: worker  # 'web' से बदलकर 'worker' करें
 
 build:
   command: pip install -r requirements.txt
 
 run:
   command: python main.py
-
-# No environment variables needed as they're in config.py
