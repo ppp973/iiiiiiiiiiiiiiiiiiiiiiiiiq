@@ -1,0 +1,12 @@
+# Suno Render Configuration
+service:
+  name: study-iq-bot
+  type: web
+
+build:
+  command: pip install -r requirements.txt
+
+run:
+  command: python main.py
+
+# No environment variables needed as they're in config.py
