@@ -1,25 +1,69 @@
 import os
 import re
+import json
 import datetime
+import logging
+import asyncio
 import pytz
 import aiofiles
 import aiohttp
 from pyrogram.types import Message
 from pyrogram import filters
 
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Constants
+API_BASE_URL = "https://api.studyiq.net/v1"  # Updated API endpoint
+WEB_BASE_URL = "https://www.studyiq.net"
+
 async def fetch_post(url, json=None, headers=None):
-    """Async POST request"""
+    """Async POST request with debugging"""
+    logger.info(f"📤 POST Request to: {url}")
+    
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=json, headers=headers) as response:
-            return await response.json()
+        try:
+            async with session.post(url, json=json, headers=headers, timeout=30) as response:
+                response_text = await response.text()
+                logger.info(f"📥 Response Status: {response.status}")
+                
+                if response.status == 200:
+                    try:
+                        return json.loads(response_text)
+                    except:
+                        return {"status": "success", "data": response_text}
+                else:
+                    logger.error(f"❌ HTTP {response.status}: {response_text[:200]}")
+                    return {"error": f"HTTP {response.status}", "message": response_text[:200]}
+        except asyncio.TimeoutError:
+            logger.error("❌ Request timeout")
+            return {"error": "timeout", "message": "Request timed out"}
+        except Exception as e:
+            logger.error(f"❌ Request failed: {str(e)}")
+            return {"error": str(e)}
 
 async def fetch_get(url, headers=None):
-    """Async GET request"""
+    """Async GET request with debugging"""
+    logger.info(f"📤 GET Request to: {url}")
+    
     async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as response:
-            if response.status == 200:
-                return await response.json()
-            return {}
+        try:
+            async with session.get(url, headers=headers, timeout=30) as response:
+                response_text = await response.text()
+                logger.info(f"📥 Response Status: {response.status}")
+                
+                if response.status == 200:
+                    try:
+                        return json.loads(response_text)
+                    except:
+                        return {"status": "success", "data": response_text}
+                else:
+                    logger.error(f"❌ HTTP {response.status}: {response_text[:200]}")
+                    return None
+        except Exception as e:
+            logger.error(f"❌ Request failed: {str(e)}")
+            return None
 
 async def sanitize_bname(bname, max_length=50):
     """Sanitize filename"""
@@ -38,11 +82,9 @@ async def login(app, m, all_urls, start_time, bname, batch_id, log_channel):
     minutes, seconds = divmod(duration.total_seconds(), 60)
     
     all_text = "\n".join(all_urls)
-    video_count = len(re.findall(r'\.(m3u8|mpd|mp4)', all_text))
+    video_count = len(re.findall(r'\.(m3u8|mp4)', all_text))
     pdf_count = len(re.findall(r'\.pdf', all_text))
-    
-    # Count DRM videos
-    drm_videos = len(re.findall(r'\.(mpd|videoid)', all_text))
+    drm_videos = len(re.findall(r'\.mpd', all_text))
     
     caption = (
         f"**🎓 STUDY IQ EXTRACTOR**\n\n"
@@ -77,7 +119,7 @@ async def login(app, m, all_urls, start_time, bname, batch_id, log_channel):
                 caption=f"**New Extraction:** {bname}\n**Batch ID:** {batch_id}"
             )
         except Exception as e:
-            print(f"Log channel error: {e}")
+            logger.error(f"Log channel error: {e}")
     
     # Clean up
     try:
@@ -87,9 +129,6 @@ async def login(app, m, all_urls, start_time, bname, batch_id, log_channel):
 
 async def get_user_input(app, chat_id, timeout=300):
     """Helper function to get user input"""
-    import asyncio
-    from pyrogram.types import Message
-    
     future = asyncio.Future()
     
     @app.on_message(filters.chat(chat_id) & filters.text & ~filters.command(["start", "help", "about", "iq"]))
@@ -111,7 +150,7 @@ async def handle_iq_command(app, m: Message):
     
     status_msg = None
     try:
-        status_msg = await m.reply_text("**📱 Send phone number or token:**")
+        status_msg = await m.reply_text("**📱 Send your 10-digit phone number or saved token:**")
         
         # Get first input
         input1 = await get_user_input(app, m.chat.id)
@@ -123,33 +162,59 @@ async def handle_iq_command(app, m: Message):
         raw_text1 = input1.text.strip()
         logged_in = False
         token = None
+        user_id = None
+
+        # Common headers for all requests
+        common_headers = {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Content-Type": "application/json",
+            "Origin": WEB_BASE_URL,
+            "Referer": f"{WEB_BASE_URL}/",
+            "Connection": "keep-alive"
+        }
 
         # Login with phone number
         if raw_text1.isdigit():
             phNum = raw_text1.strip()
+            
+            # Validate phone number
+            if len(phNum) != 10:
+                await status_msg.edit("**❌ Please enter a valid 10-digit phone number**")
+                return
+            
             await status_msg.edit("**📤 Sending OTP...**")
             
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Content-Type": "application/json"
-            }
+            # Try different endpoints for OTP
+            endpoints = [
+                f"{API_BASE_URL}/auth/login",
+                f"{WEB_BASE_URL}/api/web/userlogin",
+                f"{WEB_BASE_URL}/api/v1/auth/login"
+            ]
             
-            master0 = await fetch_post(
-                "https://www.studyiq.net/api/web/userlogin", 
-                json={"mobile": phNum},
-                headers=headers
-            )
+            success = False
+            for endpoint in endpoints:
+                try:
+                    result = await fetch_post(
+                        endpoint,
+                        json={"mobile": phNum, "country_code": "91"},  # Assuming India
+                        headers=common_headers
+                    )
+                    
+                    if result and result.get('status') == 'success' or result.get('data'):
+                        user_id = result.get('data', {}).get('user_id') or result.get('user_id')
+                        success = True
+                        logger.info(f"✅ OTP sent via {endpoint}")
+                        break
+                except:
+                    continue
             
-            if master0 and master0.get('data'):
-                user_id = master0.get('data', {}).get('user_id')
-                if user_id:
-                    await status_msg.edit("**✅ OTP sent! Enter OTP:**")
-                else:
-                    await status_msg.edit(f"**❌ Error:** {master0.get('msg', 'Unknown error')}")
-                    return
-            else:
-                await status_msg.edit(f"**❌ Error:** {master0.get('msg', 'Failed to send OTP')}")
+            if not success:
+                await status_msg.edit("**❌ Failed to send OTP. Please try again later.**")
                 return
+            
+            await status_msg.edit("**✅ OTP sent! Enter the 6-digit OTP:**")
         
             # Get OTP
             input2 = await get_user_input(app, m.chat.id)
@@ -159,67 +224,105 @@ async def handle_iq_command(app, m: Message):
             otp = input2.text.strip()
             await input2.delete()
             
-            data = {"user_id": user_id, "otp": otp}
+            if len(otp) != 6 or not otp.isdigit():
+                await status_msg.edit("**❌ Please enter a valid 6-digit OTP**")
+                return
+            
             await status_msg.edit("**🔄 Verifying OTP...**")
             
-            master1 = await fetch_post(
-                "https://www.studyiq.net/api/web/web_user_login", 
-                json=data,
-                headers=headers
-            )
+            # Verify OTP
+            verify_data = {
+                "mobile": phNum,
+                "otp": otp,
+                "user_id": user_id
+            }
             
-            if master1 and master1.get('data'):  
-                token = master1.get('data', {}).get('api_token')
-                if token:
-                    await m.reply_text(
-                        f"**✅ Login Success!**\n\n"
-                        f"**🔑 Token:** `{token}`\n\n"
-                        f"**💡 Save this token for next time!**"
-                    )
-                    logged_in = True
-                else:
-                    await status_msg.edit(f"**❌ Error:** {master1.get('msg', 'Failed to get token')}")
-                    return
+            verify_endpoints = [
+                f"{API_BASE_URL}/auth/verify",
+                f"{WEB_BASE_URL}/api/web/web_user_login",
+                f"{WEB_BASE_URL}/api/v1/auth/verify"
+            ]
+            
+            success = False
+            for endpoint in verify_endpoints:
+                result = await fetch_post(endpoint, json=verify_data, headers=common_headers)
+                
+                if result:
+                    token = (result.get('data', {}).get('api_token') or 
+                            result.get('data', {}).get('token') or 
+                            result.get('token'))
+                    
+                    if token:
+                        success = True
+                        logger.info(f"✅ Login success via {endpoint}")
+                        break
+            
+            if success and token:
+                await m.reply_text(
+                    f"**✅ Login Successful!**\n\n"
+                    f"**🔑 Your Token (SAVE THIS):**\n"
+                    f"`{token}`\n\n"
+                    f"**💡 Next time just send this token directly!**"
+                )
+                logged_in = True
             else:
-                await status_msg.edit(f"**❌ Error:** {master1.get('msg', 'OTP verification failed')}")
+                await status_msg.edit("**❌ OTP verification failed. Please try again.**")
                 return
         else:
             token = raw_text1.strip()
             logged_in = True
-            await status_msg.edit("**✅ Token accepted! Fetching courses...**")
+            await status_msg.edit("**✅ Token accepted! Fetching your courses...**")
 
         if logged_in and token:
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "application/json",
-                "Content-Type": "application/json"
+            # Headers for authenticated requests
+            auth_headers = {
+                **common_headers,
+                "Authorization": f"Bearer {token}"
             }
             
-            # Get purchased courses
-            json_master2 = await fetch_get(
-                "https://backend.studyiq.net/app-content-ws/api/v1/getAllPurchasedCourses?source=WEB", 
-                headers=headers
-            )
+            # Try different endpoints for courses
+            courses_endpoints = [
+                f"{API_BASE_URL}/user/courses",
+                f"{WEB_BASE_URL}/api/v1/user/courses",
+                "https://backend.studyiq.net/app-content-ws/api/v1/getAllPurchasedCourses?source=WEB",
+                f"{WEB_BASE_URL}/api/web/user/courses"
+            ]
             
-            if not json_master2 or not json_master2.get('data'):
-                await status_msg.edit("**❌ No courses found!**")
+            courses_data = None
+            for endpoint in courses_endpoints:
+                result = await fetch_get(endpoint, headers=auth_headers)
+                if result and result.get('data'):
+                    courses_data = result.get('data')
+                    logger.info(f"✅ Courses fetched from {endpoint}")
+                    break
+            
+            if not courses_data:
+                await status_msg.edit("**❌ No courses found or API error. Please check your token.**")
                 return
 
             # Show available batches
             batch_list = "**📚 Your Batches:**\n\n"
             batch_ids = []
             
-            for course in json_master2["data"]:
-                batch_list += f"`{course['courseId']}` - **{course['courseTitle']}**\n"
-                batch_ids.append(str(course["courseId"]))
+            for course in courses_data:
+                course_id = course.get('courseId') or course.get('id')
+                course_title = course.get('courseTitle') or course.get('title') or course.get('name')
+                
+                if course_id and course_title:
+                    batch_list += f"`{course_id}` - **{course_title}**\n"
+                    batch_ids.append(str(course_id))
+
+            if not batch_ids:
+                await status_msg.edit("**❌ No batches found in your account!**")
+                return
 
             batch_ids_str = '&'.join(batch_ids)
             
             await status_msg.edit(
                 f"{batch_list}\n"
                 f"**📤 Send Batch ID to download**\n"
-                f"**💡 Multiple: `{batch_ids[0] if batch_ids else ''}&...`**"
+                f"**💡 For multiple batches, use &**\n"
+                f"**Example:** `{batch_ids[0] if batch_ids else ''}&{batch_ids[1] if len(batch_ids) > 1 else ''}`"
             )
             
             # Get batch selection
@@ -246,72 +349,79 @@ async def handle_iq_command(app, m: Message):
                 progress_msg = await m.reply_text(f"**🔄 Processing batch {batch_id}...**")
 
                 try:
-                    # Get course details
-                    course_url = f"https://backend.studyiq.net/app-content-ws/v1/course/getDetails?courseId={batch_id}&languageId="
-                    master3 = await fetch_get(course_url, headers=headers)
+                    # Try different endpoints for batch details
+                    batch_endpoints = [
+                        f"{API_BASE_URL}/course/{batch_id}",
+                        f"{WEB_BASE_URL}/api/v1/course/{batch_id}",
+                        f"https://backend.studyiq.net/app-content-ws/v1/course/getDetails?courseId={batch_id}"
+                    ]
                     
-                    if not master3 or not master3.get('data'):
+                    batch_details = None
+                    batch_name = "Unknown"
+                    
+                    for endpoint in batch_endpoints:
+                        result = await fetch_get(endpoint, headers=auth_headers)
+                        if result:
+                            batch_details = result.get('data') or result
+                            batch_name = (batch_details.get('courseTitle') or 
+                                        batch_details.get('title') or 
+                                        batch_details.get('name') or 
+                                        f"Batch_{batch_id}")
+                            break
+                    
+                    if not batch_details:
                         await progress_msg.edit(f"**❌ No data for batch {batch_id}**")
                         continue
                     
-                    bname = master3.get("courseTitle", "Unknown")
                     all_urls = []
                     processed = 0
-                    total = len(master3['data'])
                     
-                    # Process content
-                    for item in master3['data']:
-                        t_id = str(item.get("contentId"))
-                        if not t_id:
-                            continue
-                            
-                        topicname = item.get('name', 'Unknown')
+                    # Extract content based on response structure
+                    content_items = []
+                    if isinstance(batch_details, dict):
+                        content_items = batch_details.get('modules', []) or batch_details.get('chapters', []) or batch_details.get('data', [])
+                    
+                    total_items = len(content_items) if content_items else 1
+                    
+                    if not content_items:
+                        # Try to extract videos directly
+                        videos = batch_details.get('videos', []) or batch_details.get('contents', [])
+                        for video in videos:
+                            url = video.get('videoUrl') or video.get('url')
+                            name = video.get('name') or video.get('title') or 'Video'
+                            if url:
+                                all_urls.append(f"[Video] - {name}: {url}")
+                    
+                    for item in content_items:
                         processed += 1
+                        topicname = item.get('name') or item.get('title') or f"Topic_{processed}"
                         
                         # Update progress
                         if processed % 3 == 0:
                             try:
-                                await progress_msg.edit(f"**📥 Processing:** {processed}/{total} - {topicname[:30]}...")
+                                await progress_msg.edit(f"**📥 Processing:** {processed}/{total_items} - {topicname[:30]}...")
                             except:
                                 pass
-
-                        # Get parent content
-                        parent_url = f"https://backend.studyiq.net/app-content-ws/v1/course/getDetails?courseId={batch_id}&languageId=&parentId={t_id}"
-                        parent_data = await fetch_get(parent_url, headers=headers)
                         
-                        if not parent_data or not parent_data.get('data'):
-                            continue
-                            
-                        # Process videos and notes
-                        for sub_item in parent_data['data']:
-                            # Videos
-                            url = sub_item.get('videoUrl')
-                            name = sub_item.get('name', 'Untitled')
+                        # Get videos
+                        videos = item.get('videos', []) or item.get('contents', [])
+                        for video in videos:
+                            url = video.get('videoUrl') or video.get('url')
+                            name = video.get('name') or video.get('title') or 'Untitled'
                             if url:
-                                if url.endswith('.mpd'):
-                                    all_urls.append(f"[DRM][{topicname}] - {name}: {url}")
-                                else:
-                                    all_urls.append(f"[{topicname}] - {name}: {url}")
-                            
-                            # Notes
-                            contentIdy = sub_item.get('contentId')
-                            if contentIdy:
-                                try:
-                                    lesson_url = f"https://backend.studyiq.net/app-content-ws/api/lesson/data?lesson_id={contentIdy}&courseId={batch_id}"
-                                    response = await fetch_get(lesson_url, headers=headers)
-                                    
-                                    if response and response.get('options'):
-                                        for option in response['options']:
-                                            if option.get('urls'):
-                                                for url_data in option['urls']:
-                                                    if 'name' in url_data and 'url' in url_data:
-                                                        all_urls.append(f"[Notes][{topicname}] - {url_data['name']}: {url_data['url']}")
-                                except Exception as e:
-                                    print(f"Note fetch error: {e}")
+                                all_urls.append(f"[{topicname}] - {name}: {url}")
+                        
+                        # Get notes/PDFs
+                        notes = item.get('notes', []) or item.get('pdfs', []) or item.get('attachments', [])
+                        for note in notes:
+                            url = note.get('url') or note.get('pdfUrl') or note.get('fileUrl')
+                            name = note.get('name') or note.get('title') or 'Note'
+                            if url and url.endswith('.pdf'):
+                                all_urls.append(f"[Notes][{topicname}] - {name}: {url}")
                     
                     if all_urls:
-                        await progress_msg.edit(f"**✅ Found {len(all_urls)} links! Sending...**")
-                        await login(app, m, all_urls, start_time, bname, batch_id, CHANNEL_ID)
+                        await progress_msg.edit(f"**✅ Found {len(all_urls)} links! Sending file...**")
+                        await login(app, m, all_urls, start_time, batch_name, batch_id, CHANNEL_ID)
                         await m.reply_text(f"**✅ Batch {batch_id} completed successfully!**")
                     else:
                         await progress_msg.edit(f"**⚠️ No URLs found for batch {batch_id}**")
@@ -319,9 +429,11 @@ async def handle_iq_command(app, m: Message):
                     await progress_msg.delete()
                     
                 except Exception as e:
+                    logger.error(f"Batch processing error: {str(e)}")
                     await progress_msg.edit(f"**❌ Error:** `{str(e)[:100]}`")
                     
     except Exception as e:
+        logger.error(f"Main handler error: {str(e)}")
         error_text = f"**❌ Error:** `{str(e)[:200]}`"
         if status_msg:
             await status_msg.edit(error_text)
